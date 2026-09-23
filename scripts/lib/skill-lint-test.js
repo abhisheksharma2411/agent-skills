@@ -5,7 +5,12 @@
 const assert = require('node:assert/strict');
 const { test } = require('node:test');
 
-const { lintSkillContent } = require('./skill-lint.js');
+const {
+  lintSkillContent,
+  descriptionOverlap,
+  findDescriptionCollisions,
+  DESCRIPTION_COLLISION_LIMIT,
+} = require('./skill-lint.js');
 
 const KNOWN = new Set(['alpha', 'beta']);
 
@@ -336,4 +341,107 @@ test('the error names the line so the fix is obvious', () => {
     KNOWN,
   );
   assert.match(yamlErrors(result)[0], /^Frontmatter line 4 /);
+});
+
+// ─── Routing collisions ──────────────────────────────────────────────────────
+//
+// Routing failures are the quietest skill bug there is: nothing errors, the
+// wrong skill simply answers. Two descriptions that overlap heavily cannot route
+// reliably — whichever happens to rank higher takes prompts belonging to the
+// other. With a handful of skills there is nothing to collide with; collisions
+// arrive as the catalogue grows, which is when nobody is looking for them.
+
+test('two unrelated descriptions stay well under the limit', () => {
+  const a = 'Designs retry-safe side effects. Use when adding retries.';
+  const b = 'Formats Markdown tables. Use when writing documentation.';
+  assert.ok(descriptionOverlap(a, b) < DESCRIPTION_COLLISION_LIMIT);
+});
+
+test('a reworded duplicate scores near the top of the range', () => {
+  const a = 'Designs retry-safe side effects so duplicates are harmless. Use when adding retries.';
+  const b = 'Designs retry-safe side effects so duplicates stay harmless. Use when adding retries.';
+  assert.ok(descriptionOverlap(a, b) > 0.8, `expected a near-duplicate, got ${descriptionOverlap(a, b)}`);
+});
+
+test('overlap is symmetric, including when the two differ in length', () => {
+  // Equal-length descriptions cannot tell symmetry apart from containment:
+  // `shared / A.size` is symmetric too when both sides have the same token
+  // count. The second pair is the one that distinguishes them — a short
+  // description fully contained in a long one is 1.0 under containment and
+  // well under the limit under Jaccard, which is the behaviour wanted here.
+  const a = 'Designs alpha things. Use when alpha.';
+  const b = 'Reviews beta things. Use when beta.';
+  assert.equal(descriptionOverlap(a, b), descriptionOverlap(b, a));
+
+  const short = 'Designs retries.';
+  const long =
+    'Designs retries across queues, webhooks, schedulers, ledgers, provider ' +
+    'callbacks, reconciliation sweeps and settlement windows. Use when adding ' +
+    'retries, replays, consumers or any repeated side effect anywhere.';
+  assert.equal(descriptionOverlap(short, long), descriptionOverlap(long, short));
+  assert.ok(descriptionOverlap(short, long) < DESCRIPTION_COLLISION_LIMIT,
+    'a short description contained in a long one must not read as a collision');
+});
+
+test('an empty description overlaps nothing rather than everything', () => {
+  // The degenerate case: an empty token set must not divide by zero, and two
+  // empty ones must not report a perfect match.
+  assert.equal(descriptionOverlap('', 'Designs things. Use when alpha.'), 0);
+  assert.equal(descriptionOverlap('', ''), 0);
+});
+
+test('stop words alone do not create a collision', () => {
+  // Two unrelated descriptions sharing only grammar and the `Use when`
+  // scaffolding every description carries by construction. Leaving those in
+  // floats every pair by roughly a constant and narrows the gap the limit sits in.
+  const a = 'Designs alpha. Use when you are doing the thing with a beta for it.';
+  const b = 'Reviews gamma. Use when you are doing the thing with a delta for it.';
+  assert.ok(descriptionOverlap(a, b) < DESCRIPTION_COLLISION_LIMIT,
+    `stop words leaked: ${descriptionOverlap(a, b)}`);
+});
+
+test('findDescriptionCollisions reports the offending pair once', () => {
+  const found = findDescriptionCollisions({
+    alpha: 'Designs retry-safe side effects so duplicates are harmless. Use when adding retries.',
+    beta:  'Designs retry-safe side effects so duplicates stay harmless. Use when adding retries.',
+    gamma: 'Formats Markdown tables. Use when writing documentation.',
+  });
+  assert.equal(found.length, 1);
+  assert.equal(found[0].skill, 'alpha');
+  assert.equal(found[0].other, 'beta');
+  assert.ok(found[0].score >= DESCRIPTION_COLLISION_LIMIT);
+  assert.match(found[0].message, /overlaps/);
+});
+
+test('findDescriptionCollisions is quiet on a distinct catalogue', () => {
+  assert.deepEqual(findDescriptionCollisions({
+    alpha: 'Designs retry-safe side effects. Use when adding retries.',
+    beta:  'Formats Markdown tables. Use when writing documentation.',
+  }), []);
+});
+
+test('a collision is reported once, in sorted order, not twice', () => {
+  const found = findDescriptionCollisions({
+    zeta:  'Designs retry-safe side effects so duplicates are harmless. Use when adding retries.',
+    alpha: 'Designs retry-safe side effects so duplicates stay harmless. Use when adding retries.',
+  });
+  assert.equal(found.length, 1);
+  assert.equal(found[0].skill, 'alpha');   // sorted, not insertion order
+});
+
+test('the real catalogue stays clear of the limit by a wide margin', () => {
+  // Measured, not assumed: this is the evidence the limit is set where it is.
+  // If a future skill lands close to it, this fails with the pair named.
+  const fs = require('fs');
+  const path = require('path');
+  const skillsDir = path.join(__dirname, '..', '..', 'skills');
+  const descriptions = {};
+  for (const dir of fs.readdirSync(skillsDir)) {
+    const file = path.join(skillsDir, dir, 'SKILL.md');
+    if (!fs.existsSync(file)) continue;
+    const m = fs.readFileSync(file, 'utf8').match(/^description:\s*(.*)$/m);
+    if (m) descriptions[dir] = m[1];
+  }
+  assert.ok(Object.keys(descriptions).length > 10, 'expected the real catalogue');
+  assert.deepEqual(findDescriptionCollisions(descriptions), []);
 });

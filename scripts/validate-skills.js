@@ -16,7 +16,7 @@
 const fs   = require('fs');
 const path = require('path');
 
-const { lintSkill } = require('./lib/skill-lint');
+const { lintSkill, findDescriptionCollisions, parseFrontmatter } = require('./lib/skill-lint');
 
 const SKILLS_DIR = path.resolve(__dirname, '..', 'skills');
 
@@ -37,8 +37,20 @@ function main() {
   let totalErrors   = 0;
   let totalWarnings = 0;
 
+  // Collected as we go, then compared across the whole catalogue below: a
+  // routing collision is a property of a *pair*, so it cannot be seen from
+  // inside a single skill's lint.
+  const descriptions = {};
+
   for (const dirName of skillDirs) {
     const { errors, warnings, exempt } = lintSkill(dirName, SKILLS_DIR, knownSkills);
+
+    const skillFile = path.join(SKILLS_DIR, dirName, 'SKILL.md');
+    if (fs.existsSync(skillFile)) {
+      const fm = parseFrontmatter(fs.readFileSync(skillFile, 'utf8'));
+      if (fm && typeof fm.description === 'string') descriptions[dirName] = fm.description;
+    }
+
     totalErrors   += errors.length;
     totalWarnings += warnings.length;
 
@@ -51,6 +63,12 @@ function main() {
       for (const msg of errors)   console.log(`       ERROR: ${msg}`);
       for (const msg of warnings) console.log(`       WARN:  ${msg}`);
     }
+  }
+
+  for (const finding of findDescriptionCollisions(descriptions)) {
+    totalErrors++;
+    console.log(`  ✗  ${finding.skill}`);
+    console.log(`       ERROR: ${finding.message}`);
   }
 
   const status = totalErrors > 0 ? 'FAILED' : totalWarnings > 0 ? 'PASSED WITH WARNINGS' : 'PASSED';

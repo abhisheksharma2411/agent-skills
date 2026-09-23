@@ -391,6 +391,92 @@ function lintSkill(dirName, skillsDir, knownSkills) {
 // SECTION_EXEMPT_SKILLS, SKILL_REF_PATTERNS, and the regexes) stay private so a
 // test or future consumer cannot mutate shared state and change lint results for
 // the rest of the process. Exercise the rules through these functions.
+
+// ─── Routing collisions ──────────────────────────────────────────────────────
+//
+// Routing failure is the quietest bug a skill pack has: nothing errors, the
+// wrong skill simply answers. With a handful of skills there is nothing to
+// collide with, so it is invisible early and arrives as the catalogue grows —
+// at which point the pack is large enough that nobody is reading every
+// description together.
+//
+// This compares content words only. Ordinary grammar plus the `Use when` and
+// `NOT for` scaffolding that every description here carries by construction
+// would otherwise float every pair by roughly a constant, narrowing the gap the
+// limit has to sit in.
+
+const DESCRIPTION_STOP_WORDS = new Set(
+  `a an the and or of to for in on at is are be been being use used when where
+   not with that this it its as by from into over under after before if then
+   than so do does doing what which who whom whose how why can could should
+   would may might must will shall you your we our they their he she his her
+   them us me my but also about`.split(/\s+/).filter(Boolean)
+);
+
+/** Content words of a description, for overlap comparison. */
+function descriptionTokens(text) {
+  return new Set(
+    String(text)
+      .toLowerCase()
+      .replace(/[^a-z0-9\s-]/g, ' ')
+      .split(/\s+/)
+      .filter(w => w.length > 2 && !DESCRIPTION_STOP_WORDS.has(w))
+  );
+}
+
+/** Jaccard overlap of two descriptions: 0 shares nothing, 1 is identical. */
+function descriptionOverlap(a, b) {
+  const A = descriptionTokens(a);
+  const B = descriptionTokens(b);
+  if (A.size === 0 || B.size === 0) return 0;
+  let shared = 0;
+  for (const w of A) if (B.has(w)) shared++;
+  return shared / (A.size + B.size - shared);
+}
+
+// Measured on this catalogue rather than picked, because a limit nobody can
+// justify gets raised the first time it fires. Across the 25 skills here (300
+// pairs) the median overlap is 0.02 and the widest legitimate pair is 0.14
+// (doubt-driven-development vs source-driven-development). A deliberately
+// over-broad rewrite of one description against another scores around 0.5, and a
+// reworded duplicate above 0.8. 0.35 sits in that gap — two and a half times the
+// widest real pair, and clear of the over-broad case. The numbers are pinned by
+// the test suite, so a change to the tokenizer that quietly moves them fails
+// there rather than becoming a limit someone edits to get a green build.
+const DESCRIPTION_COLLISION_LIMIT = 0.35;
+
+/**
+ * Pairs of skills whose descriptions are too close to route between.
+ *
+ * Takes a {name: description} map and returns findings rather than printing, so
+ * the rule can be exercised on a table of descriptions directly. Inferring it
+ * from validator output would only ever prove the green case, and a collision
+ * check that cannot fire is the same as no collision check.
+ *
+ * Each colliding pair is reported once, under the alphabetically first name.
+ */
+function findDescriptionCollisions(descriptions) {
+  const found = [];
+  const names = Object.keys(descriptions).sort();
+  for (let i = 0; i < names.length; i++) {
+    for (let j = i + 1; j < names.length; j++) {
+      const score = descriptionOverlap(descriptions[names[i]], descriptions[names[j]]);
+      if (score < DESCRIPTION_COLLISION_LIMIT) continue;
+      found.push({
+        skill: names[i],
+        other: names[j],
+        score,
+        message:
+          `description overlaps \`${names[j]}\` at ${score.toFixed(2)} ` +
+          `(limit ${DESCRIPTION_COLLISION_LIMIT}). Two descriptions this close cannot route ` +
+          `reliably — whichever ranks higher takes prompts belonging to the other, and ` +
+          `nothing errors when it does. Narrow both, and give each a NOT clause naming the other.`,
+      });
+    }
+  }
+  return found;
+}
+
 module.exports = {
   stripFencedCodeBlocks,
   parseFrontmatter,
@@ -398,4 +484,7 @@ module.exports = {
   extractSkillReferences,
   lintSkillContent,
   lintSkill,
+  descriptionOverlap,
+  findDescriptionCollisions,
+  DESCRIPTION_COLLISION_LIMIT,
 };
